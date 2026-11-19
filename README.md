@@ -13,24 +13,33 @@ gives a portfolio total that looks real but isn't.
 ## What I found
 
 I ran the tool on a well-known public Ethereum wallet
-(`0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045`):
+(`0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045`), November 2026 snapshot:
 
-| Step | Holdings | Total reported |
-|---|---|---|
-| Unfiltered API response | 9,054 | $573,297.63 |
-| After GoldRush `no-spam=true` | 3,513 | $504,414.70 |
+| Metric | Value |
+|---|---|
+| Holdings returned (`no-spam=true`) | 3,514 |
+| Verified total | $17,863.00 |
+| Unverified total | $494,743.06 |
+| Raw total (what a naive sum shows) | $512,606.06 |
+| Unverified share of raw total | 96.5% |
+| Holdings with a balance but no price | 2,479 |
 
-- The spam filter is honored by the API, and it removed 5,541 flagged tokens.
-- **Three tokens that passed the filter (WHITE, SNOWMOON, MOODENG) account for
-  roughly $468k of the remaining total (about 93%).** None is flagged as spam, but
-  their prices come from thin markets and could not realistically be realized.
-- Duplicate tickers (e.g. several "ETH", "DAI", "FOLD") are different contracts,
-  so tokens must be identified by contract address, never by symbol.
+- **Spam filtering works but is not enough.** An unfiltered request returned
+  9,054 holdings ($573,297.63); `no-spam=true` removed 5,541 flagged tokens.
+- **Three tokens that passed the filter (WHITE, SNOWMOON, MOODENG) make up about
+  $476k, roughly 93% of the raw total.** None is flagged as spam, but their
+  prices come from thin markets and could not realistically be realized.
+  WHITE alone is 66% of the unverified value.
+- **Prices of these tokens are unstable.** Between two runs, SNOWMOON moved from
+  about $80.9k to $88.5k while ETH barely moved.
+- **Symbols are not identities.** Several tickers (ETH, DAI, FOLD...) appear
+  multiple times as different contracts, so tokens are matched by contract
+  address, never by symbol.
+- **The native gas token needs special handling.** GoldRush identifies it by a
+  placeholder address, and my first version misclassified the wallet's ETH as
+  unverified until I tested against real data.
 
-*Snapshot taken November 2026. Prices and balances change; re-run for current numbers.*
-
-> TODO: replace this section with results from the final tool run
-> (verified total, unverified share) once the allowlist is checked.
+Prices and balances change; re-run the tool for current numbers.
 
 ## How it works
 

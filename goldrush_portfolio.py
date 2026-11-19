@@ -3,7 +3,7 @@
 goldrush_portfolio.py - wallet portfolio analyzer using the GoldRush API.
 
 Why this exists: raw token "values" from price feeds can be wildly misleading.
-A wallet can show $500k while ~93% of that value sits in illiquid or unflagged
+A wallet can show $500k while ~95% of that value sits in illiquid or unflagged
 junk tokens. This script separates holdings into:
 
   VERIFIED    native gas token + tokens whose contract address is on an allowlist
@@ -24,6 +24,9 @@ import sys
 import requests
 
 BASE = "https://api.covalenthq.com/v1"
+
+# Placeholder address GoldRush uses for a chain's native gas token (ETH on Ethereum).
+NATIVE_ADDR = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
 
 # Ethereum mainnet allowlist (lowercase). VERIFY each address on etherscan.io
 # before relying on it, and extend the list for your own use case.
@@ -57,9 +60,15 @@ def fetch_balances(chain, wallet, api_key, currency="USD"):
     return body["data"]["items"]
 
 
+def is_native(item):
+    """True for the chain's native gas token (e.g. ETH), by flag or placeholder address."""
+    addr = (item.get("contract_address") or "").lower()
+    return bool(item.get("native_token") or item.get("is_native_token") or addr == NATIVE_ADDR)
+
+
 def classify(item, allowlist):
     addr = (item.get("contract_address") or "").lower()
-    if item.get("native_token") or addr in allowlist:
+    if is_native(item) or addr in allowlist:
         return "verified"
     return "unverified"
 
@@ -79,6 +88,7 @@ def parse_items(items, allowlist):
             "value": quote or 0.0,
             "priced": quote is not None,
             "category": classify(it, allowlist),
+            "native": is_native(it),
             "type": it.get("type") or "",
         })
     return rows
@@ -121,6 +131,7 @@ def main():
     u_total = sum(r["value"] for r in rows if r["category"] == "unverified")
     grand = v_total + u_total
     unpriced = sum(1 for r in rows if not r["priced"] and r["amount"] > 0)
+    native_found = any(r["native"] for r in rows)
 
     print(f"Wallet: {args.wallet}   Chain: {args.chain}   Holdings returned: {len(rows)}")
     print_bucket("VERIFIED holdings (trusted)", verified)
@@ -134,6 +145,7 @@ def main():
     if grand > 0:
         print(f"Unverified share of raw total: {u_total / grand:.1%}")
     print(f"Holdings with balance but no price: {unpriced}")
+    print(f"Native token detected: {'yes' if native_found else 'NO - check the address column in the CSV'}")
 
     # Concentration warnings
     if u_total > 0 and unverified:
