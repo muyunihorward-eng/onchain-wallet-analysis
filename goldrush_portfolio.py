@@ -9,10 +9,14 @@ junk tokens. This script separates holdings into:
   VERIFIED    native gas token + tokens whose contract address is on an allowlist
   UNVERIFIED  everything else (value is reported, but NOT trusted)
 
+Stage 2 (--liquidity): for the top unverified holdings it asks DEX Screener
+(free, no key) how much liquidity their trading pools actually hold, and
+computes an UPPER BOUND on what could be sold.
+
 Usage (Windows cmd):
     set GOLDRUSH_API_KEY=your_key_here
     python goldrush_portfolio.py --wallet 0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045
-    python goldrush_portfolio.py --wallet 0x... --csv holdings.csv --top 15
+    python goldrush_portfolio.py --wallet 0x... --liquidity --top 10 --csv holdings.csv
 
 Identify tokens by CONTRACT ADDRESS, never by symbol: fake "ETH", "USDT" etc. exist.
 """
@@ -20,13 +24,25 @@ import argparse
 import csv
 import os
 import sys
+import time
 
 import requests
 
 BASE = "https://api.covalenthq.com/v1"
+DEX_BASE = "https://api.dexscreener.com"
 
 # Placeholder address GoldRush uses for a chain's native gas token (ETH on Ethereum).
 NATIVE_ADDR = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+
+# GoldRush chain name -> DEX Screener chain id
+CHAIN_TO_DEX = {
+    "eth-mainnet": "ethereum",
+    "base-mainnet": "base",
+    "matic-mainnet": "polygon",
+    "bsc-mainnet": "bsc",
+    "arbitrum-mainnet": "arbitrum",
+    "optimism-mainnet": "optimism",
+}
 
 # Ethereum mainnet allowlist (lowercase). VERIFY each address on etherscan.io
 # before relying on it, and extend the list for your own use case.
@@ -45,7 +61,12 @@ ALLOWLIST_ETH = {
 
 CONCENTRATION_WARN = 0.50  # warn if one holding exceeds 50% of a bucket
 
+# Liquidity status thresholds, as (feed value) / (max proceeds ceiling):
+LIQ_ILLIQUID = 1.0   # feed value >= what the pools could ever pay out
+LIQ_THIN = 0.10      # selling would move the price heavily
 
+
+# ---------------------------------------------------------------- GoldRush
 def fetch_balances(chain, wallet, api_key, currency="USD"):
     resp = requests.get(
         f"{BASE}/{chain}/address/{wallet}/balances_v2/",
@@ -90,10 +111,93 @@ def parse_items(items, allowlist):
             "category": classify(it, allowlist),
             "native": is_native(it),
             "type": it.get("type") or "",
+            # filled in by the liquidity stage
+            "liquidity_status": "not checked",
+            "liquidity_usd": None,
+            "max_proceeds_usd": None,
+            "dex_price": None,
+            "price_diff_pct": None,
         })
     return rows
 
 
+# ---------------------------------------------------------- DEX Screener
+def fetch_dex_pairs(dex_chain, token_addr, retries=3):
+    """All DEX pairs that contain this token on one chain. No API key needed."""
+    url = f"{DEX_BASE}/token-pairs/v1/{dex_chain}/{token_addr}"
+    for attempt in range(retries):
+        resp = requests.get(url, timeout=30)
+        if resp.status_code == 429:          # rate limited: back off and retry
+            time.sleep(2 * (attempt + 1))
+            continue
+        resp.raise_for_status()
+        data = resp.json()
+        # Be tolerant of both response shapes: a bare list, or {"pairs": [...]}
+        return data if isinstance(data, list) else (data.get("pairs") or [])
+    raise RuntimeError("DEX Screener rate limit (HTTP 429) persisted")
+
+
+def _liq_usd(pair):
+    return float((pair.get("liquidity") or {}).get("usd") or 0)
+
+
+def analyze_liquidity(pairs, token_addr, feed_value, feed_price):
+    """
+    Turn DEX pairs into a liquidity verdict for one token.
+
+    Assumptions (deliberately simple and conservative):
+      * Only pairs where the token is the BASE token are used, so priceUsd is the token's price.
+      * A pool's liquidity.usd counts both sides; selling can only ever draw out the
+        QUOTE side, roughly half. So max proceeds <= total_liquidity / 2.
+      * Slippage is ignored, so real proceeds would be LOWER than this ceiling.
+    """
+    token_addr = token_addr.lower()
+    base_pairs = [p for p in pairs
+                  if ((p.get("baseToken") or {}).get("address") or "").lower() == token_addr]
+    if not base_pairs:
+        return {"status": "NO_POOL", "liquidity_usd": 0.0, "max_proceeds_usd": 0.0,
+                "dex_price": None, "price_diff_pct": None}
+
+    total_liq = sum(_liq_usd(p) for p in base_pairs)
+    best = max(base_pairs, key=_liq_usd)
+    dex_price = float(best.get("priceUsd") or 0) or None
+
+    ceiling = total_liq / 2
+    ratio = feed_value / ceiling if ceiling > 0 else float("inf")
+    if ratio >= LIQ_ILLIQUID:
+        status = "ILLIQUID"
+    elif ratio >= LIQ_THIN:
+        status = "THIN"
+    else:
+        status = "OK"
+
+    diff = None
+    if feed_price and dex_price:
+        diff = (feed_price - dex_price) / dex_price * 100
+
+    return {"status": status, "liquidity_usd": total_liq,
+            "max_proceeds_usd": min(feed_value, ceiling),
+            "dex_price": dex_price, "price_diff_pct": diff}
+
+
+def run_liquidity_check(targets, dex_chain):
+    for r in targets:
+        try:
+            pairs = fetch_dex_pairs(dex_chain, r["address"])
+            res = analyze_liquidity(pairs, r["address"], r["value"], r["price"])
+        except Exception as exc:  # network/API trouble must not kill the whole run
+            print(f'  (liquidity check failed for {r["symbol"]}: {exc})')
+            r["liquidity_status"] = "ERROR"
+            continue
+        r["liquidity_status"] = res["status"]
+        r["liquidity_usd"] = res["liquidity_usd"]
+        r["max_proceeds_usd"] = res["max_proceeds_usd"]
+        r["dex_price"] = res["dex_price"]
+        r["price_diff_pct"] = res["price_diff_pct"]
+        time.sleep(0.25)  # stay far below the ~300 requests/minute limit
+
+
+# ---------------------------------------------------------------- output
 def print_bucket(title, rows, limit=None):
     print(f"\n{title}")
     print("-" * len(title))
@@ -104,12 +208,33 @@ def print_bucket(title, rows, limit=None):
         print(f"  ... and {len(rows) - limit} more")
 
 
+def print_liquidity(targets, v_total):
+    title = f"LIQUIDITY CHECK (top {len(targets)} unverified, source: DEX Screener)"
+    print(f"\n{title}")
+    print("-" * len(title))
+    print(f'{"symbol":>14}  {"feed value":>14}  {"pool liquidity":>15}  {"max proceeds":>13}  status')
+    for r in targets:
+        liq = "n/a" if r["liquidity_usd"] is None else f'${r["liquidity_usd"]:,.0f}'
+        mp = "n/a" if r["max_proceeds_usd"] is None else f'${r["max_proceeds_usd"]:,.0f}'
+        print(f'{r["symbol"][:14]:>14}  ${r["value"]:>13,.2f}  {liq:>15}  {mp:>13}  {r["liquidity_status"]}')
+
+    checked = [r for r in targets if r["max_proceeds_usd"] is not None]
+    feed = sum(r["value"] for r in checked)
+    ceiling = sum(r["max_proceeds_usd"] for r in checked)
+    print(f"\nChecked tokens: feed value ${feed:,.2f}  ->  max proceeds (upper bound) ${ceiling:,.2f}")
+    print("Max proceeds assumes only the quote side of pools can be drawn and ignores slippage,")
+    print("so real proceeds would be lower. NO_POOL = no DEX pair found on DEX Screener.")
+    print(f"Verified total + max proceeds of checked tokens: ${v_total + ceiling:,.2f}"
+          "  (unchecked tokens excluded)")
+
+
 def main():
     p = argparse.ArgumentParser(description="GoldRush wallet portfolio analyzer")
     p.add_argument("--wallet", required=True)
     p.add_argument("--chain", default="eth-mainnet")
     p.add_argument("--min-value", type=float, default=1.0, help="hide holdings below this USD value")
-    p.add_argument("--top", type=int, default=10, help="how many unverified holdings to list")
+    p.add_argument("--top", type=int, default=10, help="how many unverified holdings to list / check")
+    p.add_argument("--liquidity", action="store_true", help="check pool liquidity of top unverified holdings")
     p.add_argument("--csv", help="write all classified holdings to this CSV file")
     args = p.parse_args()
 
@@ -136,6 +261,16 @@ def main():
     print(f"Wallet: {args.wallet}   Chain: {args.chain}   Holdings returned: {len(rows)}")
     print_bucket("VERIFIED holdings (trusted)", verified)
     print_bucket(f"UNVERIFIED holdings (top {args.top}, value NOT trusted)", unverified, args.top)
+
+    if args.liquidity:
+        dex_chain = CHAIN_TO_DEX.get(args.chain)
+        if dex_chain is None:
+            print(f"\nNo DEX Screener chain mapping for {args.chain}; skipping liquidity check.")
+        else:
+            targets = unverified[:args.top]
+            print(f"\nChecking liquidity for {len(targets)} tokens ...")
+            run_liquidity_check(targets, dex_chain)
+            print_liquidity(targets, v_total)
 
     print("\nSUMMARY")
     print("-------")

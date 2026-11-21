@@ -12,3 +12,5 @@ venv/
 # Local outputs
 holdings*.csv
 *.log
+desktop.ini
+Thumbs.db
