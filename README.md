@@ -41,6 +41,40 @@ I ran the tool on a well-known public Ethereum wallet
 
 Prices and balances change; re-run the tool for current numbers.
 
+## Stage 2: can the value actually be realized?
+
+A price multiplied by a balance is not a sale price. For the top 10 unverified
+holdings I looked up each token's DEX pools and capped the sellable value at
+half the pool liquidity (only the quote side of a pool can be drawn out).
+A later snapshot of the same wallet:
+
+| Token | Feed value | Pool liquidity | Max proceeds (ceiling) | Status |
+|---|---|---|---|---|
+| WHITE | $327,430 | $2,255 | $1,127 | ILLIQUID |
+| SNOWMOON | $85,570 | $130,217 | $65,109 | ILLIQUID |
+| MOODENG | $57,694 | $307,254 | $57,694 | THIN |
+| FOLD | $7,679 | $1,329,982 | $7,679 | OK |
+| OMG | $4,977 | $3,799 | $1,900 | ILLIQUID |
+
+(Top 10 checked in total; 5 shown. FOXE had no pool found on DEX Screener.)
+
+- **Across the 10 checked tokens, feed value was $487,618 but the ceiling on
+  proceeds was $137,078, about 72% lower.**
+- **WHITE's $327k feed value sits on a pool holding about $2.3k.** The price
+  may be correct for one token and meaningless for ten billion.
+- The ceiling ignores slippage, so real proceeds would be lower still,
+  especially for SNOWMOON and MOODENG, where the position is large relative
+  to the pool.
+- "NO_POOL" means DEX Screener found no pair, not that no market exists.
+
+## Web version
+
+A browser-based version of the analyzer lives in [`web/`](web/). It shows the
+same verified vs. unverified split and liquidity check in a single page.
+See [web/README.md](web/README.md) for setup.
+
+![Web version screenshot](web/screenshot.png)
+
 ## How it works
 
 1. Fetch balances (`balances_v2`) with `no-spam=true`.
@@ -49,6 +83,8 @@ Prices and balances change; re-run the tool for current numbers.
    - **Verified**: native gas token, or contract address on an allowlist
    - **Unverified**: everything else (value reported, not trusted)
 4. Print totals, concentration warnings, and optionally export to CSV.
+5. With `--liquidity`: look up the top unverified holdings on DEX Screener and
+   compare each holding's feed value with what its trading pools could absorb.
 
 ## Usage
 
@@ -61,6 +97,9 @@ set GOLDRUSH_API_KEY=your_key_here
 export GOLDRUSH_API_KEY=your_key_here
 
 python goldrush_portfolio.py --wallet 0xYourWalletAddress --csv holdings.csv
+
+# add the liquidity check (uses DEX Screener, no extra key needed)
+python goldrush_portfolio.py --wallet 0xYourWalletAddress --liquidity --top 10
 ```
 
 Your API key is read from an environment variable and is never stored in the code.
@@ -75,7 +114,8 @@ Your API key is read from an environment variable and is never stored in the cod
 
 ## Roadmap
 
-- [ ] Liquidity checks for unverified tokens
+- [x] Liquidity checks for unverified tokens
+- [ ] Slippage model (estimate proceeds from pool reserves, not just a ceiling)
 - [ ] Transaction history analysis
 - [ ] Equivalent analysis in SQL on Dune Analytics
 - [ ] Multi-chain support
