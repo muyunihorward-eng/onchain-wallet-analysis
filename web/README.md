@@ -66,6 +66,8 @@ that single token would make the wallet look ~$300k richer than it is.
 
 ## Technical notes
 
+- If GoldRush returns holdings with no prices (a pricing outage), the page shows an
+  error instead of $0 totals, and unpriced rows show "n/a". A missing price is never treated as zero.
 - Backend: Python + Flask. Frontend: a single HTML page served by Flask.
 - Data sources: GoldRush (balances + prices), DEX Screener (pool liquidity).
 - The API key is read from the environment variable `GOLDRUSH_API_KEY` and is

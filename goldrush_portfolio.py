@@ -121,6 +121,32 @@ def parse_items(items, allowlist):
     return rows
 
 
+def price_feed_status(rows):
+    """
+    Detect a pricing outage. Returns (ok, message).
+
+    Most holdings in a normal wallet are legitimately unpriced (airdropped junk),
+    so "few priced holdings" is NOT a signal. The signal is that the well-known
+    assets (native token + allowlisted tokens) all lack prices, which is what an
+    outage looks like.
+    """
+    held = [r for r in rows if r["amount"] > 0]
+    if not held:
+        return True, ""
+    tail = (" Totals would be meaningless, so they are not shown. This is a data-feed "
+            "problem, not an empty wallet. Try again later and check your GoldRush dashboard.")
+    anchors = [r for r in held if r["category"] == "verified"]
+    if anchors:
+        if any(r["priced"] for r in anchors):
+            return True, ""
+        names = ", ".join(r["symbol"] for r in anchors[:4])
+        return False, (f"GoldRush returned {len(rows)} holdings but no price for any of the "
+                       f"well-known assets in this wallet ({names})." + tail)
+    if any(r["priced"] for r in held):
+        return True, ""
+    return False, f"GoldRush returned {len(rows)} holdings but none has a price." + tail
+
+
 # ---------------------------------------------------------- DEX Screener
 def fetch_dex_pairs(dex_chain, token_addr, retries=3):
     """All DEX pairs that contain this token on one chain. No API key needed."""
@@ -203,7 +229,8 @@ def print_bucket(title, rows, limit=None):
     print("-" * len(title))
     shown = rows[:limit] if limit else rows
     for r in shown:
-        print(f'{r["symbol"][:14]:>14}  {r["amount"]:>24,.6f}  ${r["value"]:>14,.2f}')
+        value = f'${r["value"]:>14,.2f}' if r["priced"] else f'{"n/a":>15}'
+        print(f'{r["symbol"][:14]:>14}  {r["amount"]:>24,.6f}  {value}')
     if limit and len(rows) > limit:
         print(f"  ... and {len(rows) - limit} more")
 
@@ -248,6 +275,11 @@ def main():
 
     rows = parse_items(fetch_balances(args.chain, args.wallet, api_key), allowlist)
     rows.sort(key=lambda r: r["value"], reverse=True)
+
+    ok, problem = price_feed_status(rows)
+    if not ok:
+        print(f"ERROR: {problem}", file=sys.stderr)
+        sys.exit(2)
 
     verified = [r for r in rows if r["category"] == "verified" and r["value"] >= args.min_value]
     unverified = [r for r in rows if r["category"] == "unverified" and r["value"] >= args.min_value]

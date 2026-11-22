@@ -106,6 +106,8 @@ Your API key is read from an environment variable and is never stored in the cod
 
 ## Limitations
 
+- If GoldRush returns holdings with no prices (a pricing outage), the tool stops
+  with an error instead of printing $0 totals. A missing price is never treated as zero.
 - The allowlist is small and covers Ethereum mainnet only.
 - A token being off the allowlist does not mean it is fake; it means its value
   is unverified.

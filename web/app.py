@@ -104,6 +104,32 @@ def parse_items(items, allowlist):
     return rows
 
 
+def price_feed_status(rows):
+    """
+    Detect a pricing outage. Returns (ok, message).
+
+    Most holdings in a normal wallet are legitimately unpriced (airdropped junk),
+    so "few priced holdings" is NOT a signal. The signal is that the well-known
+    assets (native token + allowlisted tokens) all lack prices, which is what an
+    outage looks like.
+    """
+    held = [r for r in rows if r["amount"] > 0]
+    if not held:
+        return True, ""
+    tail = (" Totals would be meaningless, so they are not shown. This is a data-feed "
+            "problem, not an empty wallet. Try again later and check your GoldRush dashboard.")
+    anchors = [r for r in held if r["category"] == "verified"]
+    if anchors:
+        if any(r["priced"] for r in anchors):
+            return True, ""
+        names = ", ".join(r["symbol"] for r in anchors[:4])
+        return False, (f"GoldRush returned {len(rows)} holdings but no price for any of the "
+                       f"well-known assets in this wallet ({names})." + tail)
+    if any(r["priced"] for r in held):
+        return True, ""
+    return False, f"GoldRush returned {len(rows)} holdings but none has a price." + tail
+
+
 # -------------------------------------------------------- DEX Screener
 def fetch_dex_pairs(dex_chain, token_addr, retries=3):
     url = f"{DEX_BASE}/token-pairs/v1/{dex_chain}/{token_addr}"
@@ -192,6 +218,10 @@ def api_check():
     allowlist = ALLOWLIST_ETH if chain == "eth-mainnet" else {}
     rows = parse_items(items, allowlist)
     rows.sort(key=lambda r: r["value"], reverse=True)
+
+    ok, problem = price_feed_status(rows)
+    if not ok:
+        return jsonify({"error": problem}), 502
 
     verified = [r for r in rows if r["category"] == "verified" and r["value"] >= min_value]
     unverified = [r for r in rows if r["category"] == "unverified" and r["value"] >= min_value]
@@ -331,7 +361,7 @@ function renderTable(el, rows, withLiquidity) {
     html += `<tr>
       <td>${esc(r.symbol)}</td>
       <td>${fmtAmt(r.amount)}</td>
-      <td>${fmtUsd(r.value)}</td>`;
+      <td>${r.priced ? fmtUsd(r.value) : "n/a"}</td>`;
     if (withLiquidity) {
       html += `<td>${pill(r.liquidity_status)}</td>
                <td>${fmtUsd(r.max_proceeds_usd)}</td>
