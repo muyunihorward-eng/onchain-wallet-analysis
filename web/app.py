@@ -311,7 +311,7 @@ function esc(v) {
 }
 function fmtUsd(v) {
   if (v === null || v === undefined) return "n/a";
-  return "$" + Number(v).toLocaleString(undefined, {maximumFractionDigits: 2});
+  return "$" + Number(v).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
 }
 function fmtAmt(v) {
   return Number(v).toLocaleString(undefined, {maximumFractionDigits: 6});
