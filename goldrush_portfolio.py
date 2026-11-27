@@ -62,6 +62,7 @@ ALLOWLIST_ETH = {
 }
 
 CONCENTRATION_WARN = 0.50  # warn if one holding exceeds 50% of a bucket
+TOP3_WARN = 0.75           # warn if the three largest unverified holdings exceed 75%
 
 # Liquidity status thresholds, as (feed value) / (max proceeds ceiling):
 LIQ_ILLIQUID = 1.0   # feed value >= what the pools could ever pay out
@@ -351,6 +352,13 @@ def main():
         if top["value"] / u_total > CONCENTRATION_WARN:
             print(f'WARNING: {top["symbol"]} is {top["value"] / u_total:.0%} of unverified value. '
                   "Check its liquidity before believing this price.")
+    if u_total > 0 and len(unverified) > 3:
+        top3 = unverified[:3]
+        share3 = sum(r["value"] for r in top3) / u_total
+        if share3 > TOP3_WARN:
+            names = ", ".join(r["symbol"] for r in top3)
+            print(f"WARNING: the three largest unverified holdings ({names}) are {share3:.0%} of "
+                  "unverified value. Check their liquidity before quoting any total.")
     if grand > 0 and u_total / grand > 0.5:
         print("WARNING: most of the raw total is unverified. Do not quote the raw total.")
 

@@ -54,6 +54,7 @@ ALLOWLIST_ETH = {
 LIQ_ILLIQUID = 1.0
 LIQ_THIN = 0.10
 CONCENTRATION_WARN = 0.50
+TOP3_WARN = 0.75  # the three largest unverified holdings above this share
 
 WALLET_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
 MAX_TOP = 25  # each checked token is one DEX Screener call; keep requests short
@@ -259,6 +260,12 @@ def api_check():
         t = unverified[0]
         if t["value"] / u_total > CONCENTRATION_WARN:
             warnings.append(f"{t['symbol']} is {t['value']/u_total:.0%} of unverified value. Check liquidity before believing this price.")
+    if u_total > 0 and len(unverified) > 3:
+        top3 = unverified[:3]
+        share3 = sum(r["value"] for r in top3) / u_total
+        if share3 > TOP3_WARN:
+            names = ", ".join(r["symbol"] for r in top3)
+            warnings.append(f"The three largest unverified holdings ({names}) are {share3:.0%} of unverified value. Check their liquidity before quoting any total.")
     if grand > 0 and u_total / grand > 0.5:
         warnings.append("Most of the raw total is unverified. Do not quote the raw total.")
 
@@ -433,7 +440,8 @@ async function analyze() {
       <div>Raw total<strong>${fmtUsd(t.raw)}</strong></div>
       <div>Unverified share<strong>${(t.unverified_share*100).toFixed(1)}%</strong></div>
       <div>Max proceeds (checked)<strong>${fmtUsd(t.checked_max_proceeds)}</strong></div>
-      <div>Est. proceeds (slippage model)<strong>${t.modelled_count ? fmtUsd(t.est_proceeds_modelled) : "n/a"}</strong></div>`;
+      <div>Est. proceeds (slippage model)<strong>${t.modelled_count ? fmtUsd(t.est_proceeds_modelled) : "n/a"}</strong>
+        <span style="display:block;font-size:.8rem;color:#666">${t.modelled_count} of ${t.checked_count} checked tokens; their ceiling is ${fmtUsd(t.ceiling_modelled)}</span></div>`;
 
     renderTable($("verified-table"), data.verified, false);
     renderTable($("unverified-table"), data.unverified, true);
