@@ -62,10 +62,38 @@ A later snapshot of the same wallet:
   proceeds was $137,078, about 72% lower.**
 - **WHITE's $327k feed value sits on a pool holding about $2.3k.** The price
   may be correct for one token and meaningless for ten billion.
-- The ceiling ignores slippage, so real proceeds would be lower still,
+- The ceiling ignores slippage (the slippage model below estimates it), so real proceeds would be lower still,
   especially for SNOWMOON and MOODENG, where the position is large relative
   to the pool.
 - "NO_POOL" means DEX Screener found no pair, not that no market exists.
+
+## Stage 3: what would a sale actually fetch?
+
+The "max proceeds" ceiling says what a pool could pay at most. A real sale pushes
+the price down as it executes (slippage), so `--liquidity` now also estimates the
+proceeds of selling the whole position.
+
+**Method** (in [`slippage.py`](slippage.py)):
+
+- Each pool is treated as constant-product (x * y = k). Its two sides are worth the
+  same in USD, so the reserves follow from the pool's liquidity and price.
+- A trading fee (default 0.3%, change it with `--fee-pct`) is taken from the sale.
+- The sale is split into small chunks, each routed to the pool that pays the most at
+  that moment, so several pools share it.
+- Pools labelled v3, v4 or concentrated-liquidity are excluded, because their real
+  depth near the current price differs from their total liquidity. The tool reports
+  how much of a token's pool liquidity the model covers, and marks an estimate with
+  `*` when that is under half.
+- Not modelled: price moves during the sale, MEV, exchange or bridge liquidity,
+  multi-hop routes. It is an estimate, not a quote.
+
+The model is checked against the toy pool in the field guide (1,000 tokens and
+$1,000 returns $90.91, $500.00 and $909.09 for sales of 100, 1,000 and 10,000
+tokens) in `tests/test_slippage.py`:
+
+```bash
+python -m unittest discover -s tests
+```
 
 ## Web version
 
@@ -117,7 +145,7 @@ Your API key is read from an environment variable and is never stored in the cod
 ## Roadmap
 
 - [x] Liquidity checks for unverified tokens
-- [ ] Slippage model (estimate proceeds from pool reserves, not just a ceiling)
+- [x] Slippage model (estimate proceeds from pool reserves, not just a ceiling)
 - [ ] Transaction history analysis
 - [ ] Equivalent analysis in SQL on Dune Analytics
 - [ ] Multi-chain support

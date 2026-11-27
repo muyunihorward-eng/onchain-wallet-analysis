@@ -28,6 +28,8 @@ import time
 
 import requests
 
+from slippage import DEFAULT_FEE, estimate_sale
+
 BASE = "https://api.covalenthq.com/v1"
 DEX_BASE = "https://api.dexscreener.com"
 
@@ -117,6 +119,9 @@ def parse_items(items, allowlist):
             "max_proceeds_usd": None,
             "dex_price": None,
             "price_diff_pct": None,
+            "est_proceeds_usd": None,
+            "impact_pct": None,
+            "model_coverage_pct": None,
         })
     return rows
 
@@ -167,7 +172,7 @@ def _liq_usd(pair):
     return float((pair.get("liquidity") or {}).get("usd") or 0)
 
 
-def analyze_liquidity(pairs, token_addr, feed_value, feed_price):
+def analyze_liquidity(pairs, token_addr, feed_value, feed_price, amount=None, fee=DEFAULT_FEE):
     """
     Turn DEX pairs into a liquidity verdict for one token.
 
@@ -182,7 +187,8 @@ def analyze_liquidity(pairs, token_addr, feed_value, feed_price):
                   if ((p.get("baseToken") or {}).get("address") or "").lower() == token_addr]
     if not base_pairs:
         return {"status": "NO_POOL", "liquidity_usd": 0.0, "max_proceeds_usd": 0.0,
-                "dex_price": None, "price_diff_pct": None}
+                "dex_price": None, "price_diff_pct": None,
+                "est_proceeds_usd": None, "impact_pct": None, "model_coverage_pct": None}
 
     total_liq = sum(_liq_usd(p) for p in base_pairs)
     best = max(base_pairs, key=_liq_usd)
@@ -201,16 +207,19 @@ def analyze_liquidity(pairs, token_addr, feed_value, feed_price):
     if feed_price and dex_price:
         diff = (feed_price - dex_price) / dex_price * 100
 
+    est = estimate_sale(pairs, token_addr, amount, fee)
     return {"status": status, "liquidity_usd": total_liq,
             "max_proceeds_usd": min(feed_value, ceiling),
-            "dex_price": dex_price, "price_diff_pct": diff}
+            "dex_price": dex_price, "price_diff_pct": diff,
+            "est_proceeds_usd": est["est_proceeds_usd"], "impact_pct": est["impact_pct"],
+            "model_coverage_pct": est["coverage_pct"]}
 
 
-def run_liquidity_check(targets, dex_chain):
+def run_liquidity_check(targets, dex_chain, fee=DEFAULT_FEE):
     for r in targets:
         try:
             pairs = fetch_dex_pairs(dex_chain, r["address"])
-            res = analyze_liquidity(pairs, r["address"], r["value"], r["price"])
+            res = analyze_liquidity(pairs, r["address"], r["value"], r["price"], r["amount"], fee)
         except Exception as exc:  # network/API trouble must not kill the whole run
             print(f'  (liquidity check failed for {r["symbol"]}: {exc})')
             r["liquidity_status"] = "ERROR"
@@ -220,6 +229,9 @@ def run_liquidity_check(targets, dex_chain):
         r["max_proceeds_usd"] = res["max_proceeds_usd"]
         r["dex_price"] = res["dex_price"]
         r["price_diff_pct"] = res["price_diff_pct"]
+        r["est_proceeds_usd"] = res["est_proceeds_usd"]
+        r["impact_pct"] = res["impact_pct"]
+        r["model_coverage_pct"] = res["model_coverage_pct"]
         time.sleep(0.25)  # stay far below the ~300 requests/minute limit
 
 
@@ -239,11 +251,16 @@ def print_liquidity(targets, v_total):
     title = f"LIQUIDITY CHECK (top {len(targets)} unverified, source: DEX Screener)"
     print(f"\n{title}")
     print("-" * len(title))
-    print(f'{"symbol":>14}  {"feed value":>14}  {"pool liquidity":>15}  {"max proceeds":>13}  status')
+    print(f'{"symbol":>14}  {"feed value":>14}  {"pool liquidity":>15}  {"max proceeds":>13}  '
+          f'{"est. proceeds":>14}  {"impact":>7}  status')
     for r in targets:
         liq = "n/a" if r["liquidity_usd"] is None else f'${r["liquidity_usd"]:,.0f}'
         mp = "n/a" if r["max_proceeds_usd"] is None else f'${r["max_proceeds_usd"]:,.0f}'
-        print(f'{r["symbol"][:14]:>14}  ${r["value"]:>13,.2f}  {liq:>15}  {mp:>13}  {r["liquidity_status"]}')
+        est = "n/a" if r["est_proceeds_usd"] is None else f'${r["est_proceeds_usd"]:,.0f}'
+        if r["est_proceeds_usd"] is not None and (r["model_coverage_pct"] or 0) < 50:
+            est += "*"
+        imp = "n/a" if r["impact_pct"] is None else f'{r["impact_pct"]:.0f}%'
+        print(f'{r["symbol"][:14]:>14}  ${r["value"]:>13,.2f}  {liq:>15}  {mp:>13}  {est:>14}  {imp:>7}  {r["liquidity_status"]}')
 
     checked = [r for r in targets if r["max_proceeds_usd"] is not None]
     feed = sum(r["value"] for r in checked)
@@ -253,6 +270,18 @@ def print_liquidity(targets, v_total):
     print("so real proceeds would be lower. NO_POOL = no DEX pair found on DEX Screener.")
     print(f"Verified total + max proceeds of checked tokens: ${v_total + ceiling:,.2f}"
           "  (unchecked tokens excluded)")
+    modelled = [r for r in checked if r["est_proceeds_usd"] is not None]
+    if modelled:
+        est_total = sum(r["est_proceeds_usd"] for r in modelled)
+        ceil_modelled = sum(r["max_proceeds_usd"] for r in modelled)
+        print(f"Slippage model ({len(modelled)} of {len(checked)} checked tokens): "
+              f"estimated proceeds ${est_total:,.2f} vs ceiling ${ceil_modelled:,.2f}")
+        print("Model: constant-product pools, trading fee applied, sale split across pools. "
+              "Concentrated-liquidity (v3/v4) pools are skipped, so treat it as approximate.")
+        if any((r["model_coverage_pct"] or 0) < 50 for r in modelled):
+            print("* estimate covers under half of that token's pool liquidity.")
+    else:
+        print("Slippage model: no constant-product pool available to model for these tokens.")
 
 
 def main():
@@ -262,6 +291,8 @@ def main():
     p.add_argument("--min-value", type=float, default=1.0, help="hide holdings below this USD value")
     p.add_argument("--top", type=int, default=10, help="how many unverified holdings to list / check")
     p.add_argument("--liquidity", action="store_true", help="check pool liquidity of top unverified holdings")
+    p.add_argument("--fee-pct", type=float, default=DEFAULT_FEE * 100,
+                   help="trading fee used by the slippage model, in percent (default 0.3)")
     p.add_argument("--csv", help="write all classified holdings to this CSV file")
     args = p.parse_args()
 
@@ -301,7 +332,7 @@ def main():
         else:
             targets = unverified[:args.top]
             print(f"\nChecking liquidity for {len(targets)} tokens ...")
-            run_liquidity_check(targets, dex_chain)
+            run_liquidity_check(targets, dex_chain, args.fee_pct / 100)
             print_liquidity(targets, v_total)
 
     print("\nSUMMARY")

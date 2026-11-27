@@ -13,10 +13,15 @@ it to a network, or others could spend your API credits.
 """
 import os
 import re
+import sys
 import time
 
 import requests
 from flask import Flask, jsonify, render_template_string, request
+
+# slippage.py lives in the repo root, one folder above this file
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+from slippage import DEFAULT_FEE, estimate_sale  # noqa: E402
 
 app = Flask(__name__)
 
@@ -100,6 +105,9 @@ def parse_items(items, allowlist):
             "max_proceeds_usd": None,
             "dex_price": None,
             "price_diff_pct": None,
+            "est_proceeds_usd": None,
+            "impact_pct": None,
+            "model_coverage_pct": None,
         })
     return rows
 
@@ -148,13 +156,14 @@ def _liq_usd(pair):
     return float((pair.get("liquidity") or {}).get("usd") or 0)
 
 
-def analyze_liquidity(pairs, token_addr, feed_value, feed_price):
+def analyze_liquidity(pairs, token_addr, feed_value, feed_price, amount=None, fee=DEFAULT_FEE):
     token_addr = token_addr.lower()
     base_pairs = [p for p in pairs
                   if ((p.get("baseToken") or {}).get("address") or "").lower() == token_addr]
     if not base_pairs:
         return {"status": "NO_POOL", "liquidity_usd": 0.0, "max_proceeds_usd": 0.0,
-                "dex_price": None, "price_diff_pct": None}
+                "dex_price": None, "price_diff_pct": None,
+                "est_proceeds_usd": None, "impact_pct": None, "model_coverage_pct": None}
     total_liq = sum(_liq_usd(p) for p in base_pairs)
     best = max(base_pairs, key=_liq_usd)
     dex_price = float(best.get("priceUsd") or 0) or None
@@ -169,16 +178,19 @@ def analyze_liquidity(pairs, token_addr, feed_value, feed_price):
     diff = None
     if feed_price and dex_price:
         diff = (feed_price - dex_price) / dex_price * 100
+    est = estimate_sale(pairs, token_addr, amount, fee)
     return {"status": status, "liquidity_usd": total_liq,
             "max_proceeds_usd": min(feed_value, ceiling),
-            "dex_price": dex_price, "price_diff_pct": diff}
+            "dex_price": dex_price, "price_diff_pct": diff,
+            "est_proceeds_usd": est["est_proceeds_usd"], "impact_pct": est["impact_pct"],
+            "model_coverage_pct": est["coverage_pct"]}
 
 
-def run_liquidity_check(targets, dex_chain):
+def run_liquidity_check(targets, dex_chain, fee=DEFAULT_FEE):
     for r in targets:
         try:
             pairs = fetch_dex_pairs(dex_chain, r["address"])
-            res = analyze_liquidity(pairs, r["address"], r["value"], r["price"])
+            res = analyze_liquidity(pairs, r["address"], r["value"], r["price"], r["amount"], fee)
         except Exception as exc:
             r["liquidity_status"] = f"ERROR: {exc}"
             continue
@@ -187,6 +199,9 @@ def run_liquidity_check(targets, dex_chain):
         r["max_proceeds_usd"] = res["max_proceeds_usd"]
         r["dex_price"] = res["dex_price"]
         r["price_diff_pct"] = res["price_diff_pct"]
+        r["est_proceeds_usd"] = res["est_proceeds_usd"]
+        r["impact_pct"] = res["impact_pct"]
+        r["model_coverage_pct"] = res["model_coverage_pct"]
         time.sleep(0.25)
 
 
@@ -235,6 +250,9 @@ def api_check():
     checked = [r for r in unverified[:top] if r["max_proceeds_usd"] is not None]
     feed_checked = sum(r["value"] for r in checked)
     ceiling = sum(r["max_proceeds_usd"] for r in checked)
+    modelled = [r for r in checked if r["est_proceeds_usd"] is not None]
+    est_total = sum(r["est_proceeds_usd"] for r in modelled)
+    ceiling_modelled = sum(r["max_proceeds_usd"] for r in modelled)
 
     warnings = []
     if u_total > 0 and unverified:
@@ -257,6 +275,10 @@ def api_check():
             "unverified_share": (u_total / grand) if grand else 0,
             "checked_feed_value": feed_checked,
             "checked_max_proceeds": ceiling,
+            "est_proceeds_modelled": est_total,
+            "ceiling_modelled": ceiling_modelled,
+            "modelled_count": len(modelled),
+            "checked_count": len(checked),
             # Upper bound, NOT a realistic estimate: ignores slippage and unchecked tokens.
             "upper_bound_total": v_total + ceiling,
         },
@@ -323,6 +345,7 @@ PAGE = """
   Upper-bound total = verified holdings + max proceeds of the checked unverified tokens.
   It is a <em>ceiling</em>, not an estimate: it ignores slippage and the unchecked long tail,
   so real proceeds would be lower. It is still far closer to reality than the raw total.
+  <br>Est. proceeds applies a slippage model (constant-product pools, trading fee included, sale split across pools). It skips concentrated-liquidity pools, so it is approximate, and * means it covers under half of that token's pool liquidity.
 </p>
 <h2 style="font-size:1.1rem">Verified holdings</h2>
 <table id="verified-table"></table>
@@ -355,7 +378,7 @@ function pill(status) {
 function renderTable(el, rows, withLiquidity) {
   if (!rows.length) { el.innerHTML = "<tr><td class='muted'>No holdings above threshold.</td></tr>"; return; }
   let html = "<tr><th>Symbol</th><th>Amount</th><th>Value</th>";
-  if (withLiquidity) html += "<th>Liquidity</th><th>Max proceeds</th><th>Price diff</th>";
+  if (withLiquidity) html += "<th>Liquidity</th><th>Max proceeds</th><th>Est. proceeds</th><th>Impact</th><th>Price diff</th>";
   html += "</tr>";
   for (const r of rows) {
     html += `<tr>
@@ -365,6 +388,8 @@ function renderTable(el, rows, withLiquidity) {
     if (withLiquidity) {
       html += `<td>${pill(r.liquidity_status)}</td>
                <td>${fmtUsd(r.max_proceeds_usd)}</td>
+               <td>${r.est_proceeds_usd === null ? "n/a" : fmtUsd(r.est_proceeds_usd) + (r.model_coverage_pct !== null && r.model_coverage_pct < 50 ? "*" : "")}</td>
+               <td>${r.impact_pct === null ? "n/a" : r.impact_pct.toFixed(0) + "%"}</td>
                <td>${r.price_diff_pct === null ? "n/a" : r.price_diff_pct.toFixed(2) + "%"}</td>`;
     }
     html += "</tr>";
@@ -407,7 +432,8 @@ async function analyze() {
       <div>Unverified (paper)<strong>${fmtUsd(t.unverified)}</strong></div>
       <div>Raw total<strong>${fmtUsd(t.raw)}</strong></div>
       <div>Unverified share<strong>${(t.unverified_share*100).toFixed(1)}%</strong></div>
-      <div>Max proceeds (checked)<strong>${fmtUsd(t.checked_max_proceeds)}</strong></div>`;
+      <div>Max proceeds (checked)<strong>${fmtUsd(t.checked_max_proceeds)}</strong></div>
+      <div>Est. proceeds (slippage model)<strong>${t.modelled_count ? fmtUsd(t.est_proceeds_modelled) : "n/a"}</strong></div>`;
 
     renderTable($("verified-table"), data.verified, false);
     renderTable($("unverified-table"), data.unverified, true);

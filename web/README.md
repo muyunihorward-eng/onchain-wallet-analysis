@@ -23,13 +23,16 @@ exposes that gap instead of hiding it.
   sellable ceiling of the checked tokens) and the **verified total**.
 - Warns when one token dominates the unverified value, or when most of the raw
   total is unverified.
+- Estimates what selling each checked holding would actually fetch, using a
+  slippage model (constant-product pools, trading fee included). See the parent
+  README for the method and its limits.
 
 ## What it does NOT do
 
 - It does not tell you what to buy or sell.
 - It does not promise any outcome.
-- It does not account for slippage. The "max proceeds" figure is already an
-  upper bound; real proceeds would be lower.
+- It does not model every pool type. The slippage estimate covers constant-product
+  pools only, and "max proceeds" remains an upper bound.
 - It does not cover the long tail of tokens below the value threshold.
 
 This is a **decision-support tool**. DYOR still applies.
@@ -82,5 +85,6 @@ that single token would make the wallet look ~$300k richer than it is.
 
 - The allowlist covers Ethereum mainnet only; on other chains only the native
   token counts as verified.
-- The core logic is duplicated from the command-line version in the parent
-  folder. A planned refactor will share one module between both.
+- The slippage model is shared with the command-line version (`slippage.py` in the
+  parent folder), but the rest of the logic is still duplicated. A planned refactor
+  will merge it.
